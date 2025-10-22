@@ -1,0 +1,16 @@
+[project]
+name = "paulbitcoin"
+description = "SIP-010 fungible token: PaulBitcoin"
+authors = ["NKECHI OKOYE"]
+telemetry = true
+
+[contracts.sip010-ft-trait]
+path = "contracts/traits/sip010-ft-trait.clar"
+clarity_version = 2
+epoch = 2.5
+
+[contracts.paulbitcoin]
+path = "contracts/paulbitcoin.clar"
+clarity_version = 2
+epoch = 2.5
+depends_on = ["sip010-ft-trait"]
