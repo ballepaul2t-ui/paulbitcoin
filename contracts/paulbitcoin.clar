@@ -1,101 +1,122 @@
-;; PaulBitcoin SIP-010 FT implementation
-(impl-trait .sip010-ft-trait.sip010-ft-trait)
+;; PaulBitcoin SIP-010 fungible token implementation
 
-;; Constants
-(define-constant TOKEN-NAME "PaulBitcoin")
-(define-constant TOKEN-SYMBOL "PBIT")
-(define-constant TOKEN-DECIMALS u6)
+(define-trait sip010-ft-trait
+  (
+    (transfer (uint principal principal (optional (buff 34))) (response bool uint))
+    (get-balance (principal) (response uint uint))
+    (get-total-supply () (response (optional uint) uint))
+    (get-name () (response (optional (string-ascii 32)) uint))
+    (get-symbol () (response (optional (string-ascii 8)) uint))
+    (get-decimals () (response (optional uint) uint))
+    (get-token-uri () (response (optional (string-utf8 256)) uint))
+  )
+)
 
-;; Error codes
-(define-constant ERR-UNAUTHORIZED u100)
-(define-constant ERR-NOT-INITIALIZED u101)
-(define-constant ERR-ALREADY-INITIALIZED u102)
-(define-constant ERR-INSUFFICIENT-BALANCE u103)
-(define-constant ERR-ZERO-AMOUNT u104)
+(define-constant ERR_UNAUTHORIZED u100)
+(define-constant ERR_NOT_INITIALIZED u101)
+(define-constant ERR_ALREADY_INITIALIZED u102)
+(define-constant ERR_INSUFFICIENT_BALANCE u103)
+(define-constant ERR_ZERO_AMOUNT u104)
 
-;; State
+(define-data-var token-owner (optional principal) none)
 (define-data-var total-supply uint u0)
-(define-data-var owner (optional principal) none)
-(define-map balances { account: principal } { balance: uint })
 
-;; SIP-010 read-onlys
-(define-read-only (get-name)
-  (ok TOKEN-NAME)
+(define-fungible-token paulbitcoin)
+
+(define-read-only (get-owner)
+  (var-get token-owner)
 )
 
-(define-read-only (get-symbol)
-  (ok TOKEN-SYMBOL)
+(define-private (ensure-initialized)
+  (match (var-get token-owner)
+    some-owner (ok some-owner)
+    (err ERR_NOT_INITIALIZED)
+  )
 )
 
-(define-read-only (get-decimals)
-  (ok TOKEN-DECIMALS)
+(define-private (is-owner (who principal))
+  (match (var-get token-owner)
+    some-owner (is-eq some-owner who)
+    false
+  )
 )
 
-(define-read-only (get-balance (who principal))
-  (ok (match (map-get? balances { account: who })
-        entry (get balance entry)
-        u0))
+;; One-time initializer to set the admin/owner of the token
+(define-public (initialize (owner principal))
+  (match (var-get token-owner)
+    some-owner (err ERR_ALREADY_INITIALIZED)
+    (begin
+      (var-set token-owner (some owner))
+      (ok true)
+    )
+  )
+)
+
+;; Allow the current owner to transfer ownership to a new principal
+(define-public (set-owner (new-owner principal))
+  (begin
+    (try! (ensure-initialized))
+    (if (is-owner tx-sender)
+        (begin
+          (var-set token-owner (some new-owner))
+          (ok true))
+        (err ERR_UNAUTHORIZED))
+  )
+)
+
+;; Owner-only mint function
+(define-public (mint (amount uint) (recipient principal))
+  (begin
+    (try! (ensure-initialized))
+    (if (<= amount u0)
+        (err ERR_ZERO_AMOUNT)
+        (if (is-owner tx-sender)
+            (begin
+              (var-set total-supply (+ (var-get total-supply) amount))
+              (match (ft-mint? paulbitcoin amount recipient)
+                minted (ok minted)
+                ft-err (err ft-err)))
+            (err ERR_UNAUTHORIZED)))
+  )
+)
+
+;; SIP-010 transfer implementation
+(define-public (transfer (amount uint)
+                         (sender principal)
+                         (recipient principal)
+                         (memo (optional (buff 34))))
+  (begin
+    (try! (ensure-initialized))
+    (if (<= amount u0)
+        (err ERR_ZERO_AMOUNT)
+        (if (is-eq tx-sender sender)
+            (match (ft-transfer? paulbitcoin amount sender recipient)
+              transferred (ok transferred)
+              ft-err (err ERR_INSUFFICIENT_BALANCE))
+            (err ERR_UNAUTHORIZED)))
+  )
+)
+
+(define-read-only (get-balance (owner principal))
+  (ok (ft-get-balance paulbitcoin owner))
 )
 
 (define-read-only (get-total-supply)
   (ok (some (var-get total-supply)))
 )
 
+(define-read-only (get-name)
+  (ok (some "PaulBitcoin"))
+)
+
+(define-read-only (get-symbol)
+  (ok (some "PBIT"))
+)
+
+(define-read-only (get-decimals)
+  (ok (some u6))
+)
+
 (define-read-only (get-token-uri)
   (ok none)
-)
-
-;; Admin controls
-(define-public (initialize (admin principal))
-  (if (is-none (var-get owner))
-      (begin
-        (var-set owner (some admin))
-        (ok true))
-      (err ERR-ALREADY-INITIALIZED))
-)
-
-(define-public (set-owner (new-admin principal))
-  (match (var-get owner) current
-    (if (is-eq tx-sender current)
-        (begin (var-set owner (some new-admin)) (ok true))
-        (err ERR-UNAUTHORIZED))
-    (err ERR-NOT-INITIALIZED))
-)
-
-;; Minting (owner-only)
-(define-public (mint (amount uint) (recipient principal))
-  (if (is-eq amount u0)
-      (err ERR-ZERO-AMOUNT)
-      (match (var-get owner) current
-        (if (is-eq tx-sender current)
-            (begin
-              (var-set total-supply (+ (var-get total-supply) amount))
-              (let ((rbal (match (map-get? balances { account: recipient }) r-entry (get balance r-entry) u0)))
-                (map-set balances { account: recipient } { balance: (+ rbal amount) }))
-              (ok true))
-            (err ERR-UNAUTHORIZED))
-        (err ERR-NOT-INITIALIZED)))
-)
-
-;; Transfers
-(define-public (transfer (amount uint) (sender principal) (recipient principal) (memo (optional (buff 34))))
-  (if (is-eq amount u0)
-      (err ERR-ZERO-AMOUNT)
-      (if (not (is-eq tx-sender sender))
-          (err ERR-UNAUTHORIZED)
-          (match (map-get? balances { account: sender }) s-entry
-            (let ((sbal (get balance s-entry)))
-              (if (>= sbal amount)
-                  (begin
-                    ;; debit sender
-                    (let ((new-sbal (- sbal amount)))
-                      (if (is-eq new-sbal u0)
-                          (map-delete balances { account: sender })
-                          (map-set balances { account: sender } { balance: new-sbal })))
-                    ;; credit recipient
-                    (let ((rbal (match (map-get? balances { account: recipient }) r-entry (get balance r-entry) u0)))
-                      (map-set balances { account: recipient } { balance: (+ rbal amount) }))
-                    (ok true))
-                  (err ERR-INSUFFICIENT-BALANCE)))
-            (err ERR-INSUFFICIENT-BALANCE))))
 )
